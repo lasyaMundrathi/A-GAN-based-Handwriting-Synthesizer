@@ -1,0 +1,195 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torchvision
+import torchvision.transforms as transforms
+from torch.utils.data import DataLoader
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Set random seeds for reproducibility
+torch.manual_seed(42)
+np.random.seed(42)
+
+# Hyperparameters
+latent_dim = 100  # Size of the random noise vector
+batch_size = 64
+lr = 0.0002
+beta1 = 0.5  # Adam optimizer parameter
+epochs = 25
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Data preparation
+transform = transforms.Compose([
+    transforms.ToTensor(),  # Convert images to tensor
+    transforms.Normalize((0.5,), (0.5,))  # Normalize to range [-1, 1]
+])
+
+# Load MNIST dataset
+dataset = torchvision.datasets.MNIST(root='./data', download=True, transform=transform)
+dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=2)
+
+# Generator Network
+class Generator(nn.Module):
+    def __init__(self, latent_dim):
+        super(Generator, self).__init__()
+        self.model = nn.Sequential(
+            # Input is latent vector of size latent_dim
+            nn.Linear(latent_dim, 256),
+            nn.LeakyReLU(0.2, inplace=True),
+            
+            nn.Linear(256, 512),
+            nn.LeakyReLU(0.2, inplace=True),
+            
+            nn.Linear(512, 1024),
+            nn.LeakyReLU(0.2, inplace=True),
+            
+            # Output layer: 784 values (28x28 pixel image flattened)
+            nn.Linear(1024, 784),
+            nn.Tanh()  # Tanh to ensure output range is [-1, 1]
+        )
+
+    def forward(self, z):
+        # Generate an image from noise vector z
+        img = self.model(z)
+        # Reshape to image dimensions (batch_size, 1, 28, 28)
+        img = img.view(img.size(0), 1, 28, 28)
+        return img
+
+# Discriminator Network
+class Discriminator(nn.Module):
+    def __init__(self):
+        super(Discriminator, self).__init__()
+        self.model = nn.Sequential(
+            # Input is 784-dimensional flattened image
+            nn.Linear(784, 512),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Dropout(0.3),
+            
+            nn.Linear(512, 256),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Dropout(0.3),
+            
+            # Output layer: single value for real/fake classification
+            nn.Linear(256, 1),
+            nn.Sigmoid()  # Sigmoid gives probability in range [0,1]
+        )
+
+    def forward(self, img):
+        # Flatten input image
+        img_flat = img.view(img.size(0), -1)
+        # Predict probability that input is real
+        validity = self.model(img_flat)
+        return validity
+
+# Initialize networks
+generator = Generator(latent_dim).to(device)
+discriminator = Discriminator().to(device)
+
+# Loss function
+adversarial_loss = nn.BCELoss()
+
+# Optimizers
+optimizer_G = optim.Adam(generator.parameters(), lr=lr, betas=(beta1, 0.999))
+optimizer_D = optim.Adam(discriminator.parameters(), lr=lr, betas=(beta1, 0.999))
+
+# Training function
+def train_gan():
+    for epoch in range(epochs):
+        for i, (real_imgs, _) in enumerate(dataloader):
+            
+            # Configure input
+            real_imgs = real_imgs.to(device)
+            
+            # Create labels for real and fake images
+            real_label = torch.ones(real_imgs.size(0), 1, device=device)
+            fake_label = torch.zeros(real_imgs.size(0), 1, device=device)
+            
+            # -----------------
+            #  Train Generator
+            # -----------------
+            
+            # Zero gradients
+            optimizer_G.zero_grad()
+            
+            # Generate noise for generator input
+            z = torch.randn(real_imgs.size(0), latent_dim, device=device)
+            
+            # Generate fake images
+            gen_imgs = generator(z)
+            
+            # Try to fool the discriminator
+            validity = discriminator(gen_imgs)
+            
+            # Generator loss: how well it fooled the discriminator
+            g_loss = adversarial_loss(validity, real_label)
+            
+            # Backward pass and optimize
+            g_loss.backward()
+            optimizer_G.step()
+            
+            # -----------------------
+            #  Train Discriminator
+            # -----------------------
+            
+            # Zero gradients
+            optimizer_D.zero_grad()
+            
+            # Measure discriminator's ability on real images
+            real_validity = discriminator(real_imgs)
+            real_loss = adversarial_loss(real_validity, real_label)
+            
+            # Measure discriminator's ability on fake images
+            fake_imgs = gen_imgs.detach()  # Detach to avoid training generator
+            fake_validity = discriminator(fake_imgs)
+            fake_loss = adversarial_loss(fake_validity, fake_label)
+            
+            # Overall discriminator loss
+            d_loss = (real_loss + fake_loss) / 2
+            
+            # Backward pass and optimize
+            d_loss.backward()
+            optimizer_D.step()
+            
+            # Print progress
+            if i % 100 == 0:
+                print(
+                    f"[Epoch {epoch}/{epochs}] [Batch {i}/{len(dataloader)}] "
+                    f"[D loss: {d_loss.item():.4f}] [G loss: {g_loss.item():.4f}]"
+                )
+        
+        # Save a grid of generated images after each epoch
+        if epoch % 5 == 0:
+            save_sample_images(epoch)
+
+# Function to save sample generated images
+def save_sample_images(epoch):
+    with torch.no_grad():
+        # Generate batch of images
+        z = torch.randn(25, latent_dim, device=device)
+        gen_imgs = generator(z).cpu()
+        
+        # Rescale images to [0, 1]
+        gen_imgs = 0.5 * (gen_imgs + 1.0)
+        
+        # Create grid of images
+        grid = torchvision.utils.make_grid(gen_imgs, nrow=5, normalize=False)
+        
+        # Save grid
+        plt.figure(figsize=(8, 8))
+        plt.imshow(grid.permute(1, 2, 0).numpy(), cmap='gray')
+        plt.axis('off')
+        plt.title(f"Generated Images - Epoch {epoch}")
+        plt.savefig(f"gan_generated_epoch_{epoch}.png")
+        plt.close()
+
+# Run training
+if __name__ == "__main__":
+    print(f"Training on {device}")
+    train_gan()
+    print("Training complete!")
+    
+    # Save models
+    torch.save(generator.state_dict(), "generator.pth")
+    torch.save(discriminator.state_dict(), "discriminator.pth")
+    print("Models saved successfully!")
